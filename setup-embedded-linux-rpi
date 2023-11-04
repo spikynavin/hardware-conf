@@ -1,0 +1,147 @@
+#!/bin/bash
+
+# Author Naveen raj sivasamy
+# Email navinsivasami@gmail.com
+
+# Enable this to debug the script
+#set -x
+
+NCPU=$(grep -c processor /proc/cpuinfo)
+CWD=$(pwd)
+PROGNAME="${0##*/}"
+
+usage()
+{
+	echo -e "\nusage: source ${PROGNAME} <build-dir>
+<build-dir>: Specifies the build directory location (required)
+<use-cpus>: Override the default cpus."
+
+echo -e "\nSupported MACHINE types:
+$(ls --hide=include --hide=hardware-conf ${CWD}/sources/meta-raspberrypi/conf/machine/ | cut -f 1 -d ".")"
+
+}
+
+clean_up()
+{
+	unset NCPU CWD TEMPLATES SHORTOPTS LONGOPTS ARGS PROGNAME
+	unset MACHINE DISTRO OEROOT PROJECT TEMPLATECONF MIRRORS
+	unset SOURCE CODENAME
+}
+
+SHORTOPTS="h"
+LONGOPTS="help,use-cpus:"
+
+ARGS=$(getopt --options ${SHORTOPTS} --longoptions ${LONGOPTS} --name ${PROGNAME} -- "$@")
+
+if [ $? -ne 0 -o $# -lt 1 ];then
+	usage && clean_up
+	return 1
+fi
+
+eval set -- "${ARGS}"
+
+while true;
+do
+	case $1 in
+		-h | --help)
+			usage && clean_up
+			return 0
+			shift
+			;;
+		--use-cpus)
+			echo -e "\nActual host machine CPUS: ${NCPU}"
+			NCPU=$2
+			echo -e "\nManual override of used CPUS: ${NCPU}\n"
+			shift 2
+			;;
+		--)
+			shift
+			break
+			;;
+	esac
+done
+
+if [ "$(whoami)" = "root" ];then
+	echo -e "Error: do not use the BSP as root. Exiting..."
+	exit 1
+fi
+
+if [ "${MACHINE}" != "" ];then
+	if [ ! -e $1/conf/local.conf.generic ];then
+		echo -e "Configuring for machine: \e[92m${MACHINE}\e[39m\n"
+	fi
+fi
+
+DISTRO=${DISTRO-'poky'}
+
+export BB_ENV_PASSTHROUGH_ADDITIONS="${BB_ENV_PASSTHROUGH_ADDITIONS}"
+
+OEPATH=sources/poky
+
+mkdir -p $1/conf
+
+cd ${CWD}/${OEPATH}
+
+if [ -d ${TEMPLATEPATH} ];then
+	if [ -z ${TEMPLATECONF} ];then
+		TEMPLATECONF=${TEMPLATEPATH} source oe-init-build-env ${CWD}/$1
+	else
+		source oe-init-build-env ${CWD}/$1
+	fi
+else
+	echo ${MACHINE}
+	MACHINE=${MACHINE} source oe-init-build-env ${CWD}/$1
+fi
+
+sed -r -e "s,MACHINE \?*=.*,MACHINE ?= \"${MACHINE}\",g" \
+	-e "s,DISTRO \?*=.*,DISTRO ?= \"${DISTRO}\",g" \
+	-i conf/local.conf
+
+if [ $? == 1 ];then
+	clean_up
+	cd ..
+	rm -rf $1/conf
+	return 0
+fi
+
+if ! [ -z "${MACHINE}" -a -z "${DISTRO}" -a -z "${NCPU}" ];then
+	sed -r -e "s,BB_NUMBER_THREADS \?*=.*,BB_NUMBER_THREADS = \"${NCPU}\",g" \
+		-e "s,PARALLEL_MAKE \?*=.*,PARALLEL_MAKE = \"-j ${NCPU}\",g" \
+		-e "s,BB_GENERATE_MIRROR_TARBALLS \?*=.*,BB_GENERATE_MIRROR_TARBALLS = \"1\",g" \
+		-i conf/local.conf
+fi
+
+update_mirror()
+{
+	sed -r -e "s,DL_DIR \?*=.*,,g" \
+		-e "s,SSTATE_DIR \?*=.*,,g" \
+		-i conf/local.conf
+	sed -e ':a;N;$!ba;s/\n\n\nDISTRO ?= "poky"/DISTRO ?= "poky"/g' -i conf/local.conf
+	#sed -e ':a;N;$!ba;s/\n\n\nDISTRO ?= "poky"/DISTRO ?= "poky"/g' -i local.conf.sample
+
+cat <<EOF >> conf/local.conf
+SOURCE_MIRROR_URL ?= " "
+SSTATE_MIRRORS = " "
+INHERIT += " "
+BB_NO_NETWORK = " "
+EOF
+
+}
+
+
+if [ "${MIRRORS}" == "True" ];then
+	update_mirror;
+	sed -r -e "s,SOURCE_MIRROR_URL \?*=.*,SOURCE_MIRROR_URL ?= \"file://${SOURCE}/${CODENAME}/downloads\",g" \
+		-e "s,SSTATE_MIRRORS \=.*,SSTATE_MIRRORS = \"file://.* file://${SOURCE}/${CODENAME}/sstate-cache/PATH\",g" \
+		-e "s,INHERIT \+*=.*,INHERIT += \"own-mirrors\",g" \
+		-e "s,BB_NO_NETWORK \=.*,BB_NO_NETWORK = \"1\",g" \
+		-i conf/local.conf
+fi
+
+cat <<EOF
+
+You can now run 'bitbake <target>
+
+EOF
+
+clean_up
